@@ -1,0 +1,8 @@
+# Environment variables
+.env
+
+# Firebase service account key
+firebase-admin-key.json
+
+# Google Vision API service account key
+vision-api-sa.json
