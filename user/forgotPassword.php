@@ -7,11 +7,34 @@ ini_set('display_errors', 1);
 <?php
 session_start();
 include __DIR__ . '/../dbconnection/mainDB.php';
-$FIREBASE_API_KEY = "AIzaSyCQg9yf_oWKyDAE_WApgRnG3q-BEDL6bSc";
 
-$message      = '';
-$messageType  = '';
-$showResetForm   = false;
+function loadEnv($path) {
+    if (!file_exists($path)) return;
+    $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if (!$line || strpos($line, '#') === 0) continue;
+
+        if (strpos($line, '=') !== false) {
+            list($name, $value) = explode('=', $line, 2);
+            $value = trim($value);
+            $value = preg_replace('/^["\'](.*)["\']$/', '$1', $value);
+            putenv(trim($name) . "=" . $value);
+            $_ENV[trim($name)] = $value;
+        }
+    }
+}
+loadEnv(__DIR__ . '/../.env');
+
+$FIREBASE_API_KEY = getenv('FIREBASE_API_KEY');
+if (!$FIREBASE_API_KEY) {
+    die("Firebase API key is not set. Please check your environment configuration.");
+}
+
+// ---- Initial state ----
+$message        = '';
+$messageType    = '';
+$showResetForm  = false;
 $showRequestForm = false;
 
 // ---- Detect Firebase Action ----
@@ -32,8 +55,6 @@ if ($mode === 'verifyEmail' && $oobCode) {
 
     if (isset($response['email'])) {
         $email = $response['email'];
-
-        // Update local database to mark email as verified
         $stmt = $conn->prepare("UPDATE users SET is_verified=1 WHERE email=?");
         $stmt->bind_param("s", $email);
         $stmt->execute();
@@ -46,19 +67,36 @@ if ($mode === 'verifyEmail' && $oobCode) {
         $messageType = "error";
     }
 }
-// ✅ 2. Show password reset form if link clicked
-elseif ($mode === 'resetPassword' && $oobCode) {
-    $showResetForm = true;
+// ✅ 2. Show reset form if link clicked
+elseif ($mode === 'resetPassword' && $oobCode && !isset($_POST['reset_password'])) {
+    $payload = json_encode(["oobCode" => $oobCode]);
+
+    $ch = curl_init("https://identitytoolkit.googleapis.com/v1/accounts:resetPassword?key=$FIREBASE_API_KEY");
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ["Content-Type: application/json"]);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+    $response = json_decode(curl_exec($ch), true);
+    curl_close($ch);
+
+    if (isset($response['email'])) {
+        $showResetForm = true;
+    } else {
+        $message = "❌ Invalid or expired password reset link.";
+        $messageType = "error";
+        $showRequestForm = true;
+    }
 }
-// ✅ 3. Send password reset email request
+
+// ✅ 3. Send reset email
 elseif (isset($_POST['send_reset'])) {
     $email = trim($_POST['email'] ?? '');
 
     if (!$email) {
         $message = "Please enter your email.";
         $messageType = "error";
+        $showRequestForm = true;
     } else {
-        // Check if user exists locally
         $stmt = $conn->prepare("SELECT user_id FROM users WHERE email=? AND is_active=1");
         $stmt->bind_param("s", $email);
         $stmt->execute();
@@ -68,8 +106,8 @@ elseif (isset($_POST['send_reset'])) {
         if (!$user) {
             $message = "No active user found with that email.";
             $messageType = "error";
+            $showRequestForm = true;
         } else {
-            // Firebase REST API: send password reset email
             $payload = json_encode([
                 "requestType" => "PASSWORD_RESET",
                 "email"       => $email
@@ -86,15 +124,17 @@ elseif (isset($_POST['send_reset'])) {
             if (isset($response['error'])) {
                 $message = "Firebase error: " . $response['error']['message'];
                 $messageType = "error";
+                $showRequestForm = true;
             } else {
-                $message = "Reset link sent! Check your email and follow the link to reset your password.";
+                $message = "✅ Reset link sent! Check your email.";
                 $messageType = "success";
+                $showRequestForm = false; // 👈 hide form after success
             }
         }
     }
-    $showRequestForm = true;
 }
-// ✅ 4. Process password reset form
+
+// ✅ 4. Process reset form
 elseif (isset($_POST['reset_password'])) {
     $oobCode         = $_POST['oobCode'] ?? '';
     $newPassword     = $_POST['new_password'] ?? '';
@@ -132,7 +172,6 @@ elseif (isset($_POST['reset_password'])) {
             $showResetForm = true;
         } else {
             $email = $response['email'] ?? null;
-
             if ($email) {
                 $newHash = password_hash($newPassword, PASSWORD_BCRYPT);
                 $stmt = $conn->prepare("UPDATE users SET password_hash=? WHERE email=?");
@@ -142,11 +181,15 @@ elseif (isset($_POST['reset_password'])) {
 
                 $message = "✅ Password updated successfully! You can now login.";
                 $messageType = "success";
+            } else {
+                $message = "❌ Password reset failed. Please request a new reset link.";
+                $messageType = "error";
+                $showRequestForm = true;
             }
         }
     }
 }
-// ✅ 5. Default view is request reset form
+// ✅ 5. Default view
 else {
     $showRequestForm = true;
 }
@@ -287,46 +330,30 @@ else {
       </h1>
       <p class="mt-4 text-white/90 text-lg">Secure • Fast • Intuitive</p>
     </div>
+
+    
 </section>
 
-<!-- Right panel -->
-<main class="w-full max-w-md md:ml-auto">
-<div id="card" class="card p-6 sm:p-8 reveal">
 
-  <div class="flex items-center justify-between mb-4">
-    <div class="md:hidden flex items-center gap-3">
-      <img src="/public_html/picture/logo2.png" alt="ATIERA" class="h-10 w-auto">
-      <div>
-        <div class="text-sm font-semibold leading-4">ATIERA</div>
-        <div class="text-[10px] text-[color:var(--muted)]">
-            HOTEL & RESTAURANT<span class="font-medium" style="color:var(--gold)">HR3</span>
-        </div>
-      </div>
-    </div>
-    <button id="modeBtn" class="px-3 py-2 rounded-lg border border-slate-200 text-sm
-            hover:bg-white/60 dark:hover:bg-slate-800" aria-pressed="false"
-            title="Toggle dark mode">🌓</button>
-  </div>
+<!-- UI -->
+<main class="w-full max-w-md mx-auto">
+<div class="card p-6 sm:p-8">
 
-  <h3 class="text-xl font-bold text-slate-500 dark:text-slate-400 mb-4">Account Actions</h3>
+  <h3 class="text-xl font-bold text-slate-600 mb-4">Account Recovery</h3>
 
   <?php if ($message): ?>
     <div class="<?= $messageType === 'success'
                   ? 'bg-green-100 text-green-700'
                   : 'bg-red-100 text-red-700' ?> p-3 rounded mb-4 text-center">
       <?= htmlspecialchars($message) ?>
-
-      <?php if ($mode === 'verifyEmail' && $messageType === 'success'): ?>
-        <!-- ✅ Show Login button when email verification is successful -->
-        <a href="/public_html/index.php" class="btn block text-center mt-5">
-            <span>Login</span>
-        </a>
+      <?php if ($messageType === 'success'): ?>
+        <a href="/public_html/index.php" class="btn block text-center mt-5">Login</a>
       <?php endif; ?>
     </div>
   <?php endif; ?>
 
   <?php if ($showResetForm): ?>
-      <!-- Password reset form -->
+      <!-- Reset Form -->
       <form method="POST">
           <input type="hidden" name="oobCode" value="<?= htmlspecialchars($oobCode) ?>">
           <label class="block mb-2">New Password:</label>
@@ -335,21 +362,17 @@ else {
           <input type="password" name="confirm_password" class="w-full border p-2 rounded mb-4" required>
           <button type="submit" name="reset_password" class="w-full btn">Reset Password</button>
       </form>
-      <a href="/public_html/index.php" class="btn block text-center mt-5"><span>Login</span></a>
 
   <?php elseif ($showRequestForm): ?>
-      <!-- Send reset link form -->
+      <!-- Request Reset Link -->
       <form method="POST" class="space-y-4">
-          <div class="field">
-            <input id="email" name="email" type="email" class="input peer" placeholder=" " required>
-            <label for="email" class="float-label">Enter your email</label>
-          </div>
+          <input id="email" name="email" type="email" class="w-full border p-2 rounded" placeholder="Enter your email" required>
           <button type="submit" name="send_reset" class="btn w-full">Send Reset Link</button>
       </form>
-      <a href="/public_html/index.php" class="btn block text-center mt-5"><span>Login</span></a>
+      <a href="/public_html/index.php" class="btn block text-center mt-5">Login</a>
   <?php endif; ?>
 
-  <p class="text-xs text-center text-slate-500 dark:text-slate-400 mt-4">
+  <p class="text-xs text-center text-slate-500 mt-4">
     © 2025 ATIERA BSIT 4101 CLUSTER 1
   </p>
 
@@ -357,226 +380,28 @@ else {
 </main>
 
 
+<script src="https://unpkg.com/lucide@latest/dist/lucide.min.js"></script>
 <script>
-  const $ = (s, r=document)=>r.querySelector(s);
-
-  // Elements
-  const form      = $('#loginForm');
-  const userEl    = $('#username');
-  const pwEl      = $('#password');
-  const toggle    = $('#togglePw');
-  const eyeOn     = $('#eyeOn');
-  const eyeOff    = $('#eyeOff');
-  const alertBox  = $('#alert');
-  const infoBox   = $('#info');
-  const submitBtn = $('#submitBtn');
-  const btnText   = $('#btnText');
-  const capsNote  = $('#capsNote');
-  const pwBar     = $('#pwBar');
-  const pwLabel   = $('#pwLabel');
-  const modeBtn   = $('#modeBtn');
-  const wmImg     = $('#wm');
-
-  /* ---------- Dark mode toggle ---------- */
-  modeBtn.addEventListener('click', ()=>{
-    const root = document.documentElement;
-    const dark = root.classList.toggle('dark');
-    modeBtn.setAttribute('aria-pressed', String(dark));
-    wmImg.style.transform = 'scale(1.01)'; setTimeout(()=> wmImg.style.transform = '', 220);
+  // Dark mode toggle
+  const modeBtn = document.getElementById('modeBtn');
+  modeBtn.addEventListener('click', () => {
+    document.documentElement.classList.toggle('dark');
+    const isDark = document.documentElement.classList.contains('dark');
+    modeBtn.setAttribute('aria-pressed', isDark);
+    localStorage.setItem('theme', isDark ? 'dark' : 'light');
   });
 
-  /* ---------- Alerts helpers ---------- */
-  const showError = (msg)=>{ alertBox.textContent = msg; alertBox.classList.remove('hidden'); };
-  const hideError = ()=> alertBox.classList.add('hidden');
-  const showInfo  = (msg)=>{ infoBox.textContent = msg; infoBox.classList.remove('hidden'); };
-  const hideInfo  = ()=> infoBox.classList.add('hidden');
-
-  /* ---------- Caps Lock chip ---------- */
-  function caps(e){
-    const on = e.getModifierState && e.getModifierState('CapsLock');
-    if (capsNote) capsNote.classList.toggle('hidden', !on);
+  // Load saved theme preference
+  const savedTheme = localStorage.getItem('theme');
+  if (savedTheme === 'dark' || (!savedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+    document.documentElement.classList.add('dark');
+    modeBtn.setAttribute('aria-pressed', 'true');
   }
-  pwEl.addEventListener('keyup', caps);
-  pwEl.addEventListener('keydown', caps);
 
-  /* ---------- Password meter ---------- */
-  pwEl.addEventListener('input', () => {
-    const v = pwEl.value;
-    let score = 0;
-    if (v.length >= 6) score++;
-    if (/[A-Z]/.test(v)) score++;
-    if (/[0-9]/.test(v)) score++;
-    if (/[^A-Za-z0-9]/.test(v)) score++;
-    const widths = ['12%','38%','64%','88%','100%'];
-    const labels = ['weak','fair','okay','good','strong'];
-    pwBar.style.width = widths[score];
-    pwLabel.textContent = labels[score];
+  // Initialize lucide icons
+  document.addEventListener("DOMContentLoaded", function () {
+    lucide.createIcons();
   });
-
-  /* ---------- Show/Hide password ---------- */
-  toggle.addEventListener('click', () => {
-    const show = pwEl.type === 'password';
-    pwEl.type = show ? 'text' : 'password';
-    toggle.setAttribute('aria-pressed', String(show));
-    toggle.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
-    eyeOn.classList.toggle('hidden', show);
-    eyeOff.classList.toggle('hidden', !show);
-    pwEl.focus();
-  });
-
-  /* ---------- Popup (success & goodbye only, slow animation) ---------- */
-  (() => {
-    const backdrop  = $('#popupBackdrop');
-    const root      = $('#popupRoot');
-    const card      = $('#popupCard');
-    const titleEl   = $('#popupTitle');
-    const msgEl     = $('#popupMsg');
-    const okBtn     = $('#popupOkBtn');
-    const icon      = $('#popupIcon');
-    const ripple    = $('#iconRipple');
-
-    let autoTimer = null;
-    let closeResolver = null;
-    let typingTimer = null;
-
-    const ICONS = {
-      success: `<path d="M9.5 16.2 5.8 12.5l-1.3 1.3 5 5 10-10-1.3-1.3-8.7 8.7Z" fill="currentColor"/>`,
-      goodbye: `<path d="M12 2a5 5 0 0 0-5 5v3H5a2 2 0 0 0-2 2v7h18v-7a2 2 0 0 0-2-2h-2V7a5 5 0 0 0-5-5Z" fill="currentColor"/>`
-    };
-
-    function setIcon(variant){ icon.innerHTML = ICONS[variant] || ICONS.success; }
-    function pulseRipple(){ ripple.style.animation = 'none'; void ripple.offsetWidth; ripple.style.animation = 'ripple .6s ease-out'; }
-
-    function typeMessage(text, speed=30){
-      clearInterval(typingTimer);
-      msgEl.classList.add('typing');
-      msgEl.textContent = '';
-      let i = 0;
-      typingTimer = setInterval(()=>{
-        msgEl.textContent += text.charAt(i++);
-        if (i >= text.length) { clearInterval(typingTimer); msgEl.classList.remove('typing'); }
-      }, speed);
-    }
-
-    function animateIn(variant, title, message){
-      root.classList.remove('hidden'); backdrop.classList.remove('hidden');
-      backdrop.style.animation = 'fadeBackdrop 3s both';
-      card.style.animation     = 'popSpring 3s both';
-      titleEl.style.animation  = 'slideUp 3s ease-out both';
-      msgEl.style.animation    = 'slideUp 3s ease-out both';
-      root.classList.remove('popup-success','popup-goodbye');
-      root.classList.add(`popup-${variant}`);
-      setIcon(variant);
-      titleEl.textContent = title || 'Notice';
-      pulseRipple();
-      typeMessage(message || '');
-      okBtn?.focus({ preventScroll:true });
-    }
-
-    function animateOut(){
-      backdrop.style.animation = 'fadeBackdrop 2s reverse both';
-      card.style.animation     = 'popSpring 2s reverse both';
-      setTimeout(() => {
-        root.classList.add('hidden'); backdrop.classList.add('hidden');
-      }, 160);
-    }
-
-    window.showPopup = function({ title='Notice', message='', variant='success', autocloseMs=0, onClose=null } = {}){
-      clearTimeout(autoTimer);
-      animateIn(variant, title, message);
-      if (onClose) closeResolver = onClose;
-      if (autocloseMs > 0){ autoTimer = setTimeout(() => { window.hidePopup(); }, autocloseMs); }
-    };
-
-    window.hidePopup = function(){
-      animateOut();
-      if (typeof closeResolver === 'function'){ try { closeResolver(); } catch{} }
-      closeResolver = null;
-    };
-
-    backdrop.addEventListener('click', () => window.hidePopup());
-    okBtn.addEventListener('click', () => window.hidePopup());
-    document.addEventListener('keydown', (e)=>{ if (e.key === 'Escape') window.hidePopup(); });
-  })();
-
-  /* ---------- Logout popup ---------- */
-  (function handleLogout(){
-    const q = new URLSearchParams(location.search);
-    if (q.get('logout') === '1') {
-      sessionStorage.removeItem('atiera_logged_in');
-      showPopup({
-        title: 'Goodbye, ADMIN 👋',
-        message: 'Thank you ADMIN — See you next time!',
-        variant: 'goodbye',
-        autocloseMs: 4200
-      });
-    }
-  })();
-
-  /* ---------- Auth + lockout ---------- */
-  const MAX_TRIES = 5, LOCK_MS = 60_000;
-  const triesKey = 'atiera_login_tries';
-  const lockKey  = 'atiera_login_lock';
-  let   lockTimer = null;
-
-  const num = key => Number(localStorage.getItem(key) || '0');
-  const setNum = (key,val) => localStorage.setItem(key, String(val));
-
-  function mmss(ms){
-    const s = Math.max(0, Math.ceil(ms/1000));
-    const m = Math.floor(s/60);
-    const r = s % 60;
-    return (m? `${m}:${String(r).padStart(2,'0')}` : `${r}s`);
-  }
-
-  function startLockCountdown(until){
-    clearInterval(lockTimer);
-    submitBtn.disabled = true;
-    const tick = () => {
-      const left = until - Date.now();
-      if (left <= 0){
-        clearInterval(lockTimer);
-        localStorage.removeItem(lockKey);
-        setNum(triesKey, 0);
-        submitBtn.disabled = false;
-        btnText.textContent = 'Sign In';
-        hideError(); hideInfo();
-        return;
-      }
-      btnText.textContent = `Locked ${mmss(left)}`;
-      showError(`Too many attempts. Try again in ${mmss(left)}.`);
-    };
-    tick();
-    lockTimer = setInterval(tick, 250);
-  }
-
-  function checkLock(){
-    const until = Number(localStorage.getItem(lockKey) || '0');
-    if (until > Date.now()) { startLockCountdown(until); return true; }
-    return false;
-  }
-
-  function startLoading(){ submitBtn.disabled = true; btnText.textContent = 'Checking…'; }
-  function stopLoading(ok=false){
-    if (ok){ btnText.textContent = 'Success'; }
-    else { btnText.textContent = 'Sign In'; submitBtn.disabled = false; }
-  }
-
-  function shakeCard(){
-    const card = document.getElementById('card');
-    card.style.animation = 'shakeX .35s ease-in-out';
-    setTimeout(()=> card.style.animation = '', 360);
-  }
-
-
-  // Resume countdown if locked
-  checkLock();
-</script>
-<script>
-// Clear previous chat history on new login
-localStorage.removeItem('chatHistory');
-</script>
-
 
 </body>
 </html>

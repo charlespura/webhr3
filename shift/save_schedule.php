@@ -18,6 +18,8 @@ header('Content-Type: application/json');
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
+
+
 function loadEnv($path) {
     if (!file_exists($path)) return;
     $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
@@ -36,6 +38,8 @@ function loadEnv($path) {
     }
 }
 loadEnv(__DIR__ . '/../.env');
+
+
 // Get POST data
 $employee_id = $_POST['employee_id'] ?? '';
 $work_date   = $_POST['work_date'] ?? '';

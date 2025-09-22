@@ -7,6 +7,27 @@ session_start();
 require __DIR__ . '/config/GoogleAuthenticator-master/PHPGangsta/GoogleAuthenticator.php';
 include __DIR__ . '/dbconnection/mainDb.php';
 
+function loadEnv($path) {
+    if (!file_exists($path)) return;
+    $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if (!$line || strpos($line, '#') === 0) continue;
+
+        if (strpos($line, '=') !== false) {
+            list($name, $value) = explode('=', $line, 2);
+            $value = trim($value);
+            // Remove surrounding quotes if present
+            $value = preg_replace('/^["\'](.*)["\']$/', '$1', $value);
+            putenv(trim($name) . "=" . $value);
+            $_ENV[trim($name)] = $value; // Optional: for $_ENV access
+        }
+    }
+}
+loadEnv(__DIR__ . '/.env');
+
+  $apiKey = getenv('FIREBASE_API_KEY');
+
 $ga = new PHPGangsta_GoogleAuthenticator();
 $errors = [];
 $recaptcha_secret = '6LcWessrAAAAAEldogR_ObH_We1gKnL3YHrnSG60';
@@ -170,7 +191,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (!isset($_POST['action']) || $_POST
 
                         // fallback to Firebase
                         if (!$passwordVerified) {
-                            $apiKey = "AIzaSyCQg9yf_oWKyDAE_WApgRnG3q-BEDL6bSc";
+                   $apiKey = getenv('FIREBASE_API_KEY');
+if (!$apiKey) {
+    die("Firebase API key not loaded from .env");
+}
+
                             $payload = json_encode([
                                 "email" => $user['email'],
                                 "password" => $password,
@@ -201,7 +226,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (!isset($_POST['action']) || $_POST
                         $idToken = $firebaseLogin['idToken'] ?? null;
                         $emailVerified = true;
                         if ($idToken) {
-                            $apiKey = "AIzaSyCQg9yf_oWKyDAE_WApgRnG3q-BEDL6bSc";
+                        $apiKey = getenv('FIREBASE_API_KEY');
+if (!$apiKey) {
+    die("Firebase API key not loaded from .env");
+}
+
                             $payload = json_encode(["idToken" => $idToken]);
                             $ch = curl_init("https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=$apiKey");
                             curl_setopt_array($ch, [

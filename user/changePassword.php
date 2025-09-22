@@ -1,8 +1,32 @@
 <?php
 session_start();
 include __DIR__ . '/../dbconnection/mainDB.php';
-include __DIR__ . '/public_html/config/firebase.php';
-$FIREBASE_API_KEY = "AIzaSyCQg9yf_oWKyDAE_WApgRnG3q-BEDL6bSc";
+
+
+function loadEnv($path) {
+    if (!file_exists($path)) return;
+    $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if (!$line || strpos($line, '#') === 0) continue;
+
+        if (strpos($line, '=') !== false) {
+            list($name, $value) = explode('=', $line, 2);
+            $value = trim($value);
+            // Remove surrounding quotes if present
+            $value = preg_replace('/^["\'](.*)["\']$/', '$1', $value);
+            putenv(trim($name) . "=" . $value);
+            $_ENV[trim($name)] = $value; // Optional: for $_ENV access
+        }
+    }
+}
+loadEnv(__DIR__ . '/../.env');
+
+
+
+
+
+$FIREBASE_API_KEY = getenv('FIREBASE_API_KEY');
 
 if (!isset($_SESSION['user_id'])) {
     header("Location: ../index.php");
