@@ -2,6 +2,15 @@
 session_start();
 header("Content-Type: application/json");
 
+// ==========================
+// DB Connections
+// ==========================
+include __DIR__ . '/dbconnection/dbEmployee.php'; // employees table
+$empConn = $conn;
+
+include __DIR__ . '/dbconnection/mainDB.php'; // chat_history table
+$chatConn = $conn;
+
 // --- Load .env ---
 function loadEnv($path) {
     if (!file_exists($path)) return;
@@ -27,10 +36,23 @@ $userMessage = $input["message"] ?? "Hello";
 // --- Current logged in employee ---
 $employeeId = $_SESSION['employee_id'] ?? null;
 
+// ---------------------------
+// Function: Save chat history
+// ---------------------------
+function saveChatHistory($conn, $employee_id, $sender, $message, $intent = null, $date_used = null) {
+    $stmt = $conn->prepare("INSERT INTO chat_history (employee_id, sender, message, intent, date_used) VALUES (?, ?, ?, ?, ?)");
+    if ($stmt) {
+        $empIdParam = $employee_id ?: null;
+        $stmt->bind_param("sssss", $empIdParam, $sender, $message, $intent, $date_used);
+        $stmt->execute();
+        $stmt->close();
+    }
+}
+
 // --- Step 1: Detect intent via Gemini ---
 $systemPrompt = <<<EOT
 You are a company HR chatbot.
-You help employees with attendance and schedules.
+You help employees with attendance, schedules, and leave balances.
 
 Return ONLY valid JSON:
 {
@@ -72,7 +94,6 @@ if ($response === FALSE) {
 $responseData = json_decode($response, true);
 $rawIntent = $responseData["candidates"][0]["content"]["parts"][0]["text"] ?? "{}";
 
-// Extract JSON safely
 if (preg_match('/\{.*\}/s', $rawIntent, $matches)) {
     $intentData = json_decode($matches[0], true);
 } else {
@@ -88,17 +109,27 @@ if (!$intentData || !isset($intentData["intent"])) {
     exit;
 }
 
-
 $intent = $intentData["intent"];
-$employee = $employeeId ?: ($intentData["employee"] ?? null); // ✅ auto-use session
+$employee = $employeeId ?: ($intentData["employee"] ?? null);
 $date = $intentData["date"] ?? date("Y-m-d");
 
-$finalAnswer = "";
-if ($intent === "get_attendance") {
-    $attendanceJson = file_get_contents("http://127.0.0.1/public_html/api/TimeAndAttendance.php");
-    $attendanceData = json_decode($attendanceJson, true);
+// ---------------------------
+// Save user message
+// ---------------------------
+saveChatHistory($chatConn, $employee, 'user', $userMessage, $intent, $date);
 
-    // Attempt to find attendance for the date (and optional employee)
+// ---------------------------
+// Handle intents
+// ---------------------------
+$finalAnswer = "";
+
+// ---------------------------
+// 1. Attendance
+// ---------------------------
+if ($intent === "get_attendance") {
+    $attendanceJson = @file_get_contents("http://127.0.0.1/public_html/api/TimeAndAttendance.php");
+    $attendanceData = json_decode($attendanceJson, true) ?: [];
+
     $filtered = array_filter($attendanceData, function($row) use ($employee, $date) {
         $matchDate = ($row["work_date"] === $date);
         if (!$employee) return $matchDate;
@@ -110,19 +141,12 @@ if ($intent === "get_attendance") {
     });
 
     if (!empty($filtered)) {
-        $answers = array_map(function($row) {
-            return "{$row['employee_name']} worked {$row['hours_worked']} on {$row['work_date']}. (Clock-in: {$row['clock_in']}, Clock-out: {$row['clock_out']})";
-        }, $filtered);
-
+        $answers = array_map(fn($row) => "{$row['employee_name']} worked {$row['hours_worked']} on {$row['work_date']}. (Clock-in: {$row['clock_in']}, Clock-out: {$row['clock_out']})", $filtered);
         $finalAnswer = implode("\n", $answers);
     } else {
-        // No attendance record found: resolve employee name if we have an ID
-        $displayName = $employee; // fallback
+        $displayName = $employee;
         if ($employee) {
-            // Lookup name from attendance JSON
-            $found = array_filter($attendanceData, function($row) use ($employee) {
-                return $row['employee_id'] === $employee;
-            });
+            $found = array_filter($attendanceData, fn($row) => $row['employee_id'] === $employee);
             if (!empty($found)) {
                 $firstMatch = reset($found);
                 $displayName = $firstMatch['employee_name'] ?? $employee;
@@ -132,65 +156,68 @@ if ($intent === "get_attendance") {
     }
 }
 
+// ---------------------------
+// 2. Schedule Today
+// ---------------------------
 elseif ($intent === "get_schedule_today") {
-    $finalAnswer = "";
     $today = date('Y-m-d');
 
-    // Fetch schedules
-    $scheduleJson = file_get_contents("http://127.0.0.1/public_html/api/scheduleApi.php");
-    $scheduleData = json_decode($scheduleJson, true);
+    $scheduleJson = @file_get_contents("http://127.0.0.1/public_html/api/scheduleApi.php");
+    if (!$scheduleJson) {
+        $finalAnswer = "Error: Could not fetch schedule API.";
+    } else {
+        $scheduleData = json_decode($scheduleJson, true);
+        if (!$scheduleData) {
+            $finalAnswer = "Error: Schedule API returned invalid JSON: $scheduleJson";
+        } else {
+            $employeeNames = [];
+            foreach ($scheduleData as $row) {
+                $employeeNames[$row['employee_id']] = $row['employee_name'] ?? $row['employee_id'];
+            }
 
-    // Map employee IDs to names for easier lookup
-    $employeeNames = [];
-    foreach ($scheduleData as $row) {
-        if (!isset($employeeNames[$row['employee_id']])) {
-            $employeeNames[$row['employee_id']] = $row['employee_name'] ?? $row['employee_id'];
+            $filtered = array_filter($scheduleData, function($row) use ($employee, $today) {
+                $matchDate = ($row["work_date"] === $today);
+                if (!$employee) return $matchDate;
+                return $matchDate && ($row['employee_id'] === $employee || strcasecmp($row['employee_name'] ?? '', $employee) === 0);
+            });
+
+            if (!empty($filtered)) {
+                $answers = array_map(function($row) {
+                    $empName = $row['employee_name'] ?? $row['employee_id'];
+                    $shift = is_array($row['shift_details'] ?? null) ? $row['shift_details'] : [];
+                    $shiftName = ($shift['shift_code'] ?? '') . ' - ' . ($shift['shift_name'] ?? '');
+                    $timeRange = ($shift['start_time'] ?? '') . ' - ' . ($shift['end_time'] ?? '');
+                    $notes = $row['notes'] ?: 'No notes';
+                    return "$empName has shift $shiftName ($timeRange) today. Status: {$row['status']}. Notes: $notes";
+                }, $filtered);
+                $finalAnswer = implode("\n", $answers);
+            } else {
+                $displayName = $employeeNames[$employee] ?? $employee ?? "any employee";
+                $finalAnswer = "No schedule found for $displayName today.";
+            }
         }
     }
-
-    // Filter by date and optionally by employee
-    $filtered = array_filter($scheduleData, function($row) use ($employee, $today) {
-        $matchDate = ($row["work_date"] === $today);
-        if (!$employee) return $matchDate;
-        return $matchDate && ($row['employee_id'] === $employee || strcasecmp($row['employee_name'] ?? '', $employee) === 0);
-    });
-
-    if (!empty($filtered)) {
-        $answers = array_map(function($row) {
-            $empName = $row['employee_name'] ?? $row['employee_id'];
-            $shift = $row['shift_details'] ?? [];
-            $shiftName = ($shift['shift_code'] ?? '') . ' - ' . ($shift['shift_name'] ?? '');
-            $timeRange = ($shift['start_time'] ?? '') . ' - ' . ($shift['end_time'] ?? '');
-            $notes = $row['notes'] ?: 'No notes';
-            return "$empName has shift $shiftName ($timeRange) today. Status: {$row['status']}. Notes: $notes";
-        }, $filtered);
-
-        $finalAnswer = implode("\n", $answers);
-    } else {
-        // Show employee name even if no schedule is found
-        $displayName = $employeeNames[$employee] ?? $employee ?? "any employee";
-        $finalAnswer = "No schedule found for $displayName today.";
-    }
 }
+
+// ---------------------------
+// 3. Leave Balance
+// ---------------------------
 
 elseif ($intent === "get_leave_balance") {
-    $finalAnswer = "";
-
-    // Fetch leave balances from API
-    $leaveJson = file_get_contents("http://127.0.0.1/public_html/api/leaveApi.php");
+    $leaveJson = @file_get_contents("http://127.0.0.1/public_html/api/leaveApi.php");
     $leaveData = json_decode($leaveJson, true);
 
-    if (!$leaveData) {
+    if (!$leaveData || !is_array($leaveData)) {
         $finalAnswer = "Unable to fetch leave balances.";
     } else {
-    // Detect requested leave type from user input
-$employee_leave_type = null;
-if (preg_match('/(?:my\s+)?leave\s+balance(?:\s+in)?\s+(.+)/i', $userMessage, $matches)) {
-    $employee_leave_type = trim($matches[1]); // e.g., "sick leave"
-}
-$leaveTypeFilter = strtolower($employee_leave_type ?? "");
+        // Try to detect requested leave type from user message
+        $employee_leave_type = null;
+        if (preg_match('/leave\s+balance(?:\s+in)?\s+(.+)/i', $userMessage, $matches)) {
+            $employee_leave_type = trim($matches[1]);
+        }
+        $leaveTypeFilter = strtolower($employee_leave_type ?? "");
 
-        // Filter by employee if specified
+        // Filter data for the employee
         $filtered = [];
         foreach ($leaveData as $row) {
             if (!$employee || strcasecmp($row['employee_name'], $employee) === 0 || $row['employee_id'] === $employee) {
@@ -203,27 +230,24 @@ $leaveTypeFilter = strtolower($employee_leave_type ?? "");
             foreach ($filtered as $row) {
                 $empName = $row['employee_name'] ?? $row['employee_id'];
                 $msg = "$empName's Leave Balances:\n\n";
-
                 $found = false;
-                foreach ($row['leave_balances'] as $lb) {
-                    // Filter by requested leave type if specified
-                    if ($leaveTypeFilter && stripos($lb['leave_name'], $leaveTypeFilter) === false) continue;
 
-                    $msg .= "{$lb['leave_name']} - Remaining: {$lb['remaining_days']}, Total: {$lb['total_days']}, Used: {$lb['used_days']}\n\n";
-                    $found = true;
+                if (!empty($row['leave_balances']) && is_array($row['leave_balances'])) {
+                    foreach ($row['leave_balances'] as $lb) {
+                        if ($leaveTypeFilter && stripos($lb['leave_name'], $leaveTypeFilter) === false) continue;
+                        $msg .= "{$lb['leave_name']} - Remaining: {$lb['remaining_days']}, Total: {$lb['total_days']}, Used: {$lb['used_days']}\n";
+                        $found = true;
+                    }
                 }
 
                 if (!$found) {
-                    if ($leaveTypeFilter) {
-                        $msg .= "No records found for '{$employee_leave_type}'.\n";
-                    } else {
-                        $msg .= "No leave balance records available.\n";
-                    }
+                    $msg .= $leaveTypeFilter 
+                        ? "No records found for '{$employee_leave_type}'.\n" 
+                        : "No leave balance records available.\n";
                 }
 
                 $answers[] = $msg;
             }
-
             $finalAnswer = implode("\n", $answers);
         } else {
             $displayName = $employee ?? "any employee";
@@ -232,17 +256,21 @@ $leaveTypeFilter = strtolower($employee_leave_type ?? "");
     }
 }
 
-
-
-elseif ($intent === "get_claims") {
-    $finalAnswer = "Leave balance lookup not yet implemented. (Stub)";
-}
-
-
+// ---------------------------
+// 4. Small Talk / Default
+// ---------------------------
 else {
     $finalAnswer = "Hello 👋 How can I help you today?";
 }
 
+// ---------------------------
+// Save bot response
+// ---------------------------
+saveChatHistory($chatConn, $employee, 'bot', $finalAnswer, $intent, $date);
+
+// ---------------------------
+// Return JSON response
+// ---------------------------
 echo json_encode([
     "answer" => $finalAnswer,
     "intent" => $intentData,
