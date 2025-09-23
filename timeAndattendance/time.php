@@ -1,4 +1,8 @@
 <?php
+// Start session
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
@@ -81,15 +85,20 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST['manual_submit'])) {
     } else {
         $schedule_id = $sched['schedule_id'];
 
-        // Step 2: Map employee → user_id
-        $empStmt = $empConn->prepare("SELECT user_id FROM employees WHERE employee_id = ? LIMIT 1");
-        $empStmt->bind_param('s', $employee_id);
-        $empStmt->execute();
-        $empRes = $empStmt->get_result();
-        if ($empRes->num_rows == 0) {
-            set_flash_message(" No user_id found for employee_id {$employee_id}");
-        } else {
-            $user_id = $empRes->fetch_assoc()['user_id'];
+       $empStmt = $empConn->prepare("SELECT user_id FROM employees WHERE employee_id = ? LIMIT 1");
+$empStmt->bind_param('s', $employee_id);
+$empStmt->execute();
+$empRes = $empStmt->get_result();
+
+if ($empRes->num_rows == 0) {
+    set_flash_message("❌ No employee record found for employee_id {$employee_id}");
+} else {
+    $row = $empRes->fetch_assoc();
+    $user_id = $row['user_id'];
+
+    if (empty($user_id)) {
+        set_flash_message("❌ This employee has no linked account (no user_id). Manual clock-in is not allowed.");
+    } else {
 
             // Step 3: Calculate worked hours
             $workedHours = null;
@@ -134,6 +143,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST['manual_submit'])) {
             }
         }
     }
+}
 }
 ?>
 

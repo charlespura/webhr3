@@ -598,17 +598,17 @@ Welcome to ATIERA HOTEL & RESTAURANT HR3! -->
 
   <!-- reCAPTCHA v2 Checkbox -->
   <div class="g-recaptcha" data-sitekey="6LcWessrAAAAANsdwWOfPKg2Td6CSu2j9dDbbjth"></div>
+<!-- Terms & Conditions -->
+<div class="mt-4">
+  <input type="checkbox" id="terms" name="terms" required checked>
+  <label for="terms" class="text-sm text-slate-600 dark:text-slate-400">
+    By Logging in you agree to the 
+    <a href="/public_html/user/privacyPolicy.php" target="_blank" class="text-blue-600 underline">Privacy Policy</a> 
+    and 
+    <a href="/public_html/user/terms.php" target="_blank" class="text-blue-600 underline">Terms & Conditions</a>.
+  </label>
+</div>
 
-  <!-- Terms & Conditions -->
-  <div class="mt-4">
-    <input type="checkbox" id="terms" name="terms" required>
-    <label for="terms" class="text-sm text-slate-600 dark:text-slate-400">
-      I agree to the 
-      <a href="/public_html/user/privacyPolicy.php" target="_blank" class="text-blue-600 underline">Privacy Policy</a> 
-      and 
-      <a href="/public_html/user/terms.php" target="_blank" class="text-blue-600 underline">Terms & Conditions</a>.
-    </label>
-  </div>
 <!-- Remember Me -->
 <div class="mt-2">
   <input type="checkbox" id="remember" name="remember">
